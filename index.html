@@ -84,22 +84,23 @@
       statusEl.textContent = "Ready";
     }
 
-    function preprocess(sourceCanvas, invert = false, hardThreshold = false) {
-      const w = sourceCanvas.width;
-      const h = sourceCanvas.height;
+    function preprocess(sourceCanvas, invert = false) {
+      const scale = 2; // upscale for better OCR
+      const w = sourceCanvas.width * scale;
+      const h = sourceCanvas.height * scale;
       const out = document.createElement("canvas");
       out.width = w;
       out.height = h;
       const octx = out.getContext("2d");
-      octx.drawImage(sourceCanvas, 0, 0);
+      octx.imageSmoothingEnabled = true;
+      octx.drawImage(sourceCanvas, 0, 0, w, h);
 
       const imgData = octx.getImageData(0, 0, w, h);
       const data = imgData.data;
       for (let i = 0; i < data.length; i += 4) {
         let v = (data[i] + data[i+1] + data[i+2]) / 3;
-        v = (v - 128) * 1.5 + 128;
+        v = (v - 128) * 1.4 + 128;
         v = Math.max(0, Math.min(255, v));
-        if (hardThreshold) v = v > 120 ? 255 : 0;
         if (invert) v = 255 - v;
         data[i] = data[i+1] = data[i+2] = v;
       }
@@ -120,9 +121,8 @@
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
 
-      // Slightly larger center crop
-      const cw = Math.floor(canvas.width * 0.75);
-      const ch = Math.floor(canvas.height * 0.45);
+      const cw = Math.floor(canvas.width * 0.7);
+      const ch = Math.floor(canvas.height * 0.4);
       const crop = document.createElement("canvas");
       crop.width = cw;
       crop.height = ch;
@@ -133,21 +133,18 @@
         cw, ch, 0, 0, cw, ch
       );
 
-      // Invert tags (white-on-dark → black-on-white). Soft threshold for mass.
-      const processed = preprocess(crop, !isMass, isMass);
-
+      const processed = preprocess(crop, !isMass);
       preview.src = processed.toDataURL("image/jpeg", 0.85);
 
+      // No whitelist on tags — let it read freely, then clean
       if (isMass) {
         await worker.setParameters({
           tessedit_char_whitelist: "0123456789.",
           tessedit_pageseg_mode: "7"
         });
       } else {
-        // Looser for tags — allow the letters and digits we expect
         await worker.setParameters({
-          tessedit_char_whitelist: "0123456789QAqa",
-          tessedit_pageseg_mode: "7"
+          tessedit_pageseg_mode: "6"  // single block, often better for short codes
         });
       }
 
@@ -159,8 +156,16 @@
         rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)");
 
         if (mode === "tag") {
+          // Look for the expected pattern anywhere in the text
           const match = cleaned.match(/[QAqa]\d{5,6}/i);
-          bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+          if (match) {
+            bagInput.value = match[0].toUpperCase();
+          } else {
+            // Fallback: strip non-alphanumeric and take the longest plausible token
+            const tokens = cleaned.replace(/[^A-Za-z0-9]/g, " ").split(/\s+/).filter(Boolean);
+            const best = tokens.sort((a, b) => b.length - a.length)[0] || "";
+            bagInput.value = best.toUpperCase();
+          }
         } else {
           const match = cleaned.match(/\d+\.?\d*/);
           massInput.value = match ? match[0] : cleaned.replace(/[^0-9.]/g, "");
