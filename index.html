@@ -1,213 +1,83 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-  <title>Litter Bag Loader</title>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 12px; background: #f5f5f5; }
-    h1 { font-size: 1.4rem; }
-    video { width: 100%; max-height: 45vh; background: #000; border-radius: 8px; }
-    #preview { max-width: 100%; margin-top: 8px; border: 1px solid #ccc; border-radius: 4px; }
-    .row { margin: 10px 0; }
-    button { padding: 12px 16px; font-size: 1rem; margin: 4px; border: none; border-radius: 6px; background: #1a73e8; color: white; }
-    input { font-size: 1.2rem; padding: 8px; width: 100%; box-sizing: border-box; }
-    .status { min-height: 1.5em; color: #333; white-space: pre-wrap; }
-    .ok { color: green; }
-    .err { color: #c00; }
-    .raw { font-size: 0.85rem; color: #555; margin-top: 4px; }
-  </style>
-</head>
-<body>
-  <h1>Litter Bag Loader</h1>
-  <video id="video" autoplay playsinline muted></video>
-  <canvas id="canvas" style="display:none"></canvas>
-  <img id="preview" alt="OCR preview">
+async function captureAndOCR(mode) {
+  if (!worker) return;
+  if (!video.videoWidth || !video.videoHeight) {
+    statusEl.textContent = "Camera not ready — wait and try again";
+    return;
+  }
 
-  <div class="row">
-    <button id="btnTag">Capture Tag</button>
-    <button id="btnMass">Capture Mass</button>
-  </div>
+  const isMass = mode === "mass";
 
-  <div class="row">
-    <label>Bag ID<br>
-      <input id="bag" placeholder="e.g. Q260001 or A260145" autocomplete="off">
-    </label>
-  </div>
-  <div class="row">
-    <label>Mass<br>
-      <input id="mass" type="number" step="0.01" placeholder="e.g. 12.45" autocomplete="off">
-    </label>
-  </div>
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  ctx.drawImage(video, 0, 0);
 
-  <div class="row">
-    <button id="btnSubmit">Submit to Sheet</button>
-  </div>
-  <div id="status" class="status"></div>
-  <div id="raw" class="raw"></div>
+  const cw = Math.floor(canvas.width * 0.7);
+  const ch = Math.floor(canvas.height * 0.4);
+  const crop = document.createElement("canvas");
+  crop.width = cw;
+  crop.height = ch;
+  crop.getContext("2d").drawImage(
+    canvas,
+    (canvas.width - cw) / 2,
+    (canvas.height - ch) / 2,
+    cw, ch, 0, 0, cw, ch
+  );
 
-  <script>
-    const WEB_APP = "https://script.google.com/macros/s/AKfycbzo-9C1EV4fdGmMgsFmocIjNaPJ5VS1aKllQiizxonB4fSw1Quuti2o34z75RfWhUKs/exec";
+  const processed = preprocess(crop, !isMass);
+  preview.src = processed.toDataURL("image/jpeg", 0.85);
 
-    const video = document.getElementById("video");
-    const canvas = document.getElementById("canvas");
-    const ctx = canvas.getContext("2d");
-    const preview = document.getElementById("preview");
-    const bagInput = document.getElementById("bag");
-    const massInput = document.getElementById("mass");
-    const statusEl = document.getElementById("status");
-    const rawEl = document.getElementById("raw");
+  statusEl.textContent = "Reading…";
+  rawEl.textContent = "";
 
-    let worker = null;
+  try {
+    let bestText = "";
+    let bestScore = -1;
 
-    async function initCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: false
-        });
-        video.srcObject = stream;
-        await new Promise(r => video.onloadedmetadata = r);
-        statusEl.textContent = "Camera ready";
-      } catch (err) {
-        statusEl.textContent = "Camera error: " + err.message;
-        statusEl.className = "status err";
-      }
-    }
-
-    async function initOCR() {
-      statusEl.textContent = "Loading OCR…";
-      worker = await Tesseract.createWorker("eng", 1, {
-        logger: m => { if (m.status === "recognizing text") statusEl.textContent = `OCR ${Math.round(m.progress * 100)}%`; }
+    // Try a couple of page-segmentation modes and keep the best result
+    const psms = isMass ? ["7", "8"] : ["7", "6", "8"];
+    for (const psm of psms) {
+      await worker.setParameters({
+        tessedit_pageseg_mode: psm,
+        tessedit_char_whitelist: isMass ? "0123456789." : ""
       });
-      statusEl.textContent = "Ready";
+      const { data: { text } } = await worker.recognize(processed);
+      const cleaned = (text || "").replace(/\s+/g, " ").trim();
+      const score = cleaned.length + (cleaned.match(/[QAqa]\d{5,6}/i) ? 10 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        bestText = cleaned;
+      }
     }
 
-    function preprocess(sourceCanvas, invert = false) {
-      const scale = 2; // upscale for better OCR
-      const w = sourceCanvas.width * scale;
-      const h = sourceCanvas.height * scale;
-      const out = document.createElement("canvas");
-      out.width = w;
-      out.height = h;
-      const octx = out.getContext("2d");
-      octx.imageSmoothingEnabled = true;
-      octx.drawImage(sourceCanvas, 0, 0, w, h);
+    rawEl.textContent = "Raw OCR: " + (bestText || "(nothing)");
 
-      const imgData = octx.getImageData(0, 0, w, h);
-      const data = imgData.data;
-      for (let i = 0; i < data.length; i += 4) {
-        let v = (data[i] + data[i+1] + data[i+2]) / 3;
-        v = (v - 128) * 1.4 + 128;
-        v = Math.max(0, Math.min(255, v));
-        if (invert) v = 255 - v;
-        data[i] = data[i+1] = data[i+2] = v;
+    if (mode === "tag") {
+      // Prefer a clean match
+      let match = bestText.match(/[QAqa]\d{5,6}/i);
+      if (!match) {
+        // Soft cleanup of common OCR mistakes then retry
+        const fixed = bestText
+          .replace(/[Oo]/g, "0")
+          .replace(/[IiLl]/g, "1")
+          .replace(/[Ss]/g, "5")
+          .replace(/[Zz]/g, "2");
+        match = fixed.match(/[QAqa]\d{5,6}/i);
+        if (match) bestText = fixed;
       }
-      octx.putImageData(imgData, 0, 0);
-      return out;
-    }
-
-    async function captureAndOCR(mode) {
-      if (!worker) return;
-      if (!video.videoWidth || !video.videoHeight) {
-        statusEl.textContent = "Camera not ready — wait and try again";
-        return;
-      }
-
-      const isMass = mode === "mass";
-
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0);
-
-      const cw = Math.floor(canvas.width * 0.7);
-      const ch = Math.floor(canvas.height * 0.4);
-      const crop = document.createElement("canvas");
-      crop.width = cw;
-      crop.height = ch;
-      crop.getContext("2d").drawImage(
-        canvas,
-        (canvas.width - cw) / 2,
-        (canvas.height - ch) / 2,
-        cw, ch, 0, 0, cw, ch
-      );
-
-      const processed = preprocess(crop, !isMass);
-      preview.src = processed.toDataURL("image/jpeg", 0.85);
-
-      // No whitelist on tags — let it read freely, then clean
-      if (isMass) {
-        await worker.setParameters({
-          tessedit_char_whitelist: "0123456789.",
-          tessedit_pageseg_mode: "7"
-        });
+      if (match) {
+        bagInput.value = match[0].toUpperCase();
       } else {
-        await worker.setParameters({
-          tessedit_pageseg_mode: "6"  // single block, often better for short codes
-        });
+        const tokens = bestText.replace(/[^A-Za-z0-9]/g, " ").split(/\s+/).filter(Boolean);
+        const best = tokens.sort((a, b) => b.length - a.length)[0] || "";
+        bagInput.value = best.toUpperCase();
       }
-
-      statusEl.textContent = "Reading…";
-      rawEl.textContent = "";
-      try {
-        const { data: { text } } = await worker.recognize(processed);
-        const cleaned = (text || "").replace(/\s+/g, " ").trim();
-        rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)");
-
-        if (mode === "tag") {
-          // Look for the expected pattern anywhere in the text
-          const match = cleaned.match(/[QAqa]\d{5,6}/i);
-          if (match) {
-            bagInput.value = match[0].toUpperCase();
-          } else {
-            // Fallback: strip non-alphanumeric and take the longest plausible token
-            const tokens = cleaned.replace(/[^A-Za-z0-9]/g, " ").split(/\s+/).filter(Boolean);
-            const best = tokens.sort((a, b) => b.length - a.length)[0] || "";
-            bagInput.value = best.toUpperCase();
-          }
-        } else {
-          const match = cleaned.match(/\d+\.?\d*/);
-          massInput.value = match ? match[0] : cleaned.replace(/[^0-9.]/g, "");
-        }
-        statusEl.textContent = "OCR done — edit if needed";
-      } catch (err) {
-        statusEl.textContent = "OCR error: " + err.message;
-        statusEl.className = "status err";
-      }
+    } else {
+      const match = bestText.match(/\d+\.?\d*/);
+      massInput.value = match ? match[0] : bestText.replace(/[^0-9.]/g, "");
     }
-
-    document.getElementById("btnTag").onclick = () => captureAndOCR("tag");
-    document.getElementById("btnMass").onclick = () => captureAndOCR("mass");
-
-    document.getElementById("btnSubmit").onclick = async () => {
-      const bag = bagInput.value.trim().toUpperCase();
-      const mass = parseFloat(massInput.value);
-      if (!bag || isNaN(mass)) {
-        statusEl.textContent = "Need a valid bag ID and mass";
-        statusEl.className = "status err";
-        return;
-      }
-      statusEl.textContent = "Sending…";
-      try {
-        await fetch(WEB_APP, {
-          method: "POST",
-          mode: "no-cors",
-          headers: { "Content-Type": "text/plain" },
-          body: JSON.stringify({ bag, mass })
-        });
-        statusEl.textContent = "Submitted. Bag: " + bag + " mass: " + mass;
-        statusEl.className = "status ok";
-      } catch (err) {
-        statusEl.textContent = "Submit failed: " + err.message;
-        statusEl.className = "status err";
-      }
-    };
-
-    (async () => {
-      await initCamera();
-      await initOCR();
-    })();
-  </script>
-</body>
-</html>
+    statusEl.textContent = "OCR done — edit if needed";
+  } catch (err) {
+    statusEl.textContent = "OCR error: " + err.message;
+    statusEl.className = "status err";
+  }
+}
