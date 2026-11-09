@@ -59,7 +59,9 @@
     const statusEl = document.getElementById("status");
     const rawEl = document.getElementById("raw");
 
-    let worker = null;
+    let tesseractWorker = null;
+    let textDetector = null;
+    let useNative = false;
 
     async function initCamera() {
       try {
@@ -78,24 +80,21 @@
 
     async function initOCR() {
       statusEl.textContent = "Loading OCR…";
-      worker = await Tesseract.createWorker("eng", 1, {
+      if ("TextDetector" in window) {
+        try {
+          textDetector = new TextDetector();
+          useNative = true;
+          statusEl.textContent = "Ready (native TextDetector)";
+          return;
+        } catch (e) {
+          console.warn("TextDetector failed", e);
+        }
+      }
+      // Fallback
+      tesseractWorker = await Tesseract.createWorker("eng", 1, {
         logger: m => { if (m.status === "recognizing text") statusEl.textContent = `OCR ${Math.round(m.progress * 100)}%`; }
       });
-      statusEl.textContent = "Ready";
-    }
-
-    function makeCrop(srcCanvas, xFrac, yFrac, wFrac, hFrac, scale = 2) {
-      const sx = Math.floor(srcCanvas.width * xFrac);
-      const sy = Math.floor(srcCanvas.height * yFrac);
-      const sw = Math.floor(srcCanvas.width * wFrac);
-      const sh = Math.floor(srcCanvas.height * hFrac);
-      const out = document.createElement("canvas");
-      out.width = sw * scale;
-      out.height = sh * scale;
-      const octx = out.getContext("2d");
-      octx.imageSmoothingEnabled = true;
-      octx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, out.width, out.height);
-      return out;
+      statusEl.textContent = "Ready (Tesseract fallback)";
     }
 
     function preprocess(sourceCanvas, invert = false) {
@@ -117,20 +116,23 @@
       return out;
     }
 
-    function scoreText(text) {
-      const cleaned = (text || "").replace(/\s+/g, " ").trim();
-      const match = cleaned.match(/[QAqa]\d{5,6}/i);
-      return {
-        cleaned,
-        score: cleaned.length + (match ? 20 : 0) + (cleaned.match(/\d{5,}/) ? 5 : 0),
-        match: match ? match[0].toUpperCase() : null
-      };
+    async function recognizeWithNative(canvasEl) {
+      const texts = await textDetector.detect(canvasEl);
+      return texts.map(t => t.rawValue || "").join(" ").trim();
+    }
+
+    async function recognizeWithTesseract(canvasEl, isMass) {
+      await tesseractWorker.setParameters({
+        tessedit_pageseg_mode: "7",
+        tessedit_char_whitelist: isMass ? "0123456789." : "0123456789QAqa"
+      });
+      const { data: { text } } = await tesseractWorker.recognize(canvasEl);
+      return (text || "").replace(/\s+/g, " ").trim();
     }
 
     async function captureAndOCR(mode) {
-      if (!worker) return;
       if (!video.videoWidth || !video.videoHeight) {
-        statusEl.textContent = "Camera not ready — wait and try again";
+        statusEl.textContent = "Camera not ready";
         return;
       }
 
@@ -139,54 +141,41 @@
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
 
+      const cw = Math.floor(canvas.width * 0.7);
+      const ch = Math.floor(canvas.height * 0.4);
+      const crop = document.createElement("canvas");
+      crop.width = cw * 2;
+      crop.height = ch * 2;
+      crop.getContext("2d").drawImage(
+        canvas,
+        (canvas.width - cw) / 2,
+        (canvas.height - ch) / 2,
+        cw, ch,
+        0, 0, crop.width, crop.height
+      );
+
+      const processed = preprocess(crop, !isMass);
+      preview.src = processed.toDataURL("image/jpeg", 0.85);
+
       statusEl.textContent = "Reading…";
       rawEl.textContent = "";
 
-      const crops = [
-        { x: 0.15, y: 0.3, w: 0.7, h: 0.4 },
-        { x: 0.1, y: 0.25, w: 0.8, h: 0.5 },
-        { x: 0.2, y: 0.35, w: 0.6, h: 0.3 }
-      ];
-
-      let best = { cleaned: "", score: -1, match: null, preview: null };
-
       try {
-        for (const c of crops) {
-          const crop = makeCrop(canvas, c.x, c.y, c.w, c.h, 2);
-          for (const invert of [true, false]) {
-            const processed = preprocess(crop, invert && !isMass);
-            const psms = isMass ? ["7", "8"] : ["7", "6", "8", "13"];
-            for (const psm of psms) {
-              await worker.setParameters({
-                tessedit_pageseg_mode: psm,
-                tessedit_char_whitelist: isMass ? "0123456789." : ""
-              });
-              const { data: { text } } = await worker.recognize(processed);
-              const result = scoreText(text);
-              if (result.score > best.score) {
-                best = { ...result, preview: processed.toDataURL("image/jpeg", 0.8) };
-              }
-            }
-          }
+        let cleaned = "";
+        if (useNative && textDetector) {
+          cleaned = await recognizeWithNative(processed);
+        } else if (tesseractWorker) {
+          cleaned = await recognizeWithTesseract(processed, isMass);
         }
 
-        if (best.preview) preview.src = best.preview;
-        rawEl.textContent = "Raw OCR: " + (best.cleaned || "(nothing)");
+        rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)") + (useNative ? " [native]" : " [tesseract]");
 
         if (mode === "tag") {
-          if (best.match) {
-            bagInput.value = best.match;
-          } else {
-            // soft fix then retry
-            const fixed = best.cleaned
-              .replace(/[Oo]/g, "0").replace(/[IiLl]/g, "1")
-              .replace(/[Ss]/g, "5").replace(/[Zz]/g, "2");
-            const m = fixed.match(/[QAqa]\d{5,6}/i);
-            bagInput.value = m ? m[0].toUpperCase() : (fixed.replace(/[^A-Za-z0-9]/g, "").toUpperCase() || "");
-          }
+          const match = cleaned.match(/[QAqa]\d{5,6}/i);
+          bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
         } else {
-          const m = best.cleaned.match(/\d+\.?\d*/);
-          massInput.value = m ? m[0] : best.cleaned.replace(/[^0-9.]/g, "");
+          const match = cleaned.match(/\d+\.?\d*/);
+          massInput.value = match ? match[0] : cleaned.replace(/[^0-9.]/g, "");
         }
         statusEl.textContent = "OCR done — edit if needed";
       } catch (err) {
