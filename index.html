@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
   <title>Litter Bag Loader</title>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; margin: 12px; background: #f5f5f5; }
     h1 { font-size: 1.4rem; }
@@ -12,6 +11,7 @@
     #preview { max-width: 100%; margin-top: 8px; border: 1px solid #ccc; border-radius: 4px; }
     .row { margin: 10px 0; }
     button { padding: 12px 16px; font-size: 1rem; margin: 4px; border: none; border-radius: 6px; background: #1a73e8; color: white; }
+    button:disabled { opacity: 0.5; }
     input { font-size: 1.2rem; padding: 8px; width: 100%; box-sizing: border-box; }
     .status { min-height: 1.5em; color: #333; white-space: pre-wrap; }
     .ok { color: green; }
@@ -26,8 +26,8 @@
   <img id="preview" alt="OCR preview">
 
   <div class="row">
-    <button id="btnTag">Capture Tag</button>
-    <button id="btnMass">Capture Mass</button>
+    <button id="btnTag" disabled>Capture Tag</button>
+    <button id="btnMass" disabled>Capture Mass</button>
   </div>
 
   <div class="row">
@@ -58,10 +58,10 @@
     const massInput = document.getElementById("mass");
     const statusEl = document.getElementById("status");
     const rawEl = document.getElementById("raw");
+    const btnTag = document.getElementById("btnTag");
+    const btnMass = document.getElementById("btnMass");
 
-    let tesseractWorker = null;
     let textDetector = null;
-    let useNative = false;
 
     async function initCamera() {
       try {
@@ -79,73 +79,41 @@
     }
 
     async function initOCR() {
-      statusEl.textContent = "Loading OCR…";
-      if ("TextDetector" in window) {
-        try {
-          textDetector = new TextDetector();
-          useNative = true;
-          statusEl.textContent = "Ready (native TextDetector)";
-          return;
-        } catch (e) {
-          console.warn("TextDetector failed", e);
-        }
+      if (!("TextDetector" in window)) {
+        statusEl.textContent = "TextDetector not supported on this browser";
+        statusEl.className = "status err";
+        return;
       }
-      // Fallback
-      tesseractWorker = await Tesseract.createWorker("eng", 1, {
-        logger: m => { if (m.status === "recognizing text") statusEl.textContent = `OCR ${Math.round(m.progress * 100)}%`; }
-      });
-      statusEl.textContent = "Ready (Tesseract fallback)";
-    }
-
-    function preprocess(sourceCanvas, invert = false) {
-      const out = document.createElement("canvas");
-      out.width = sourceCanvas.width;
-      out.height = sourceCanvas.height;
-      const octx = out.getContext("2d");
-      octx.drawImage(sourceCanvas, 0, 0);
-      const imgData = octx.getImageData(0, 0, out.width, out.height);
-      const data = imgData.data;
-      for (let i = 0; i < data.length; i += 4) {
-        let v = (data[i] + data[i+1] + data[i+2]) / 3;
-        v = (v - 128) * 1.5 + 128;
-        v = Math.max(0, Math.min(255, v));
-        if (invert) v = 255 - v;
-        data[i] = data[i+1] = data[i+2] = v;
+      try {
+        textDetector = new TextDetector();
+        btnTag.disabled = false;
+        btnMass.disabled = false;
+        statusEl.textContent = "Ready (TextDetector)";
+      } catch (err) {
+        statusEl.textContent = "TextDetector failed: " + err.message;
+        statusEl.className = "status err";
       }
-      octx.putImageData(imgData, 0, 0);
-      return out;
-    }
-
-    async function recognizeWithNative(canvasEl) {
-      const texts = await textDetector.detect(canvasEl);
-      return texts.map(t => t.rawValue || "").join(" ").trim();
-    }
-
-    async function recognizeWithTesseract(canvasEl, isMass) {
-      await tesseractWorker.setParameters({
-        tessedit_pageseg_mode: "7",
-        tessedit_char_whitelist: isMass ? "0123456789." : "0123456789QAqa"
-      });
-      const { data: { text } } = await tesseractWorker.recognize(canvasEl);
-      return (text || "").replace(/\s+/g, " ").trim();
     }
 
     async function captureAndOCR(mode) {
+      if (!textDetector) return;
       if (!video.videoWidth || !video.videoHeight) {
         statusEl.textContent = "Camera not ready";
         return;
       }
 
       const isMass = mode === "mass";
+
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
 
+      // Center crop, upscaled a bit
       const cw = Math.floor(canvas.width * 0.7);
-      const ch = Math.floor(canvas.height * 0.4);
+      const ch = Math.floor(canvas.height * 0.45);
       const crop = document.createElement("canvas");
-      crop.width = cw * 2;
-      crop.height = ch * 2;
+      crop.width = Math.floor(cw * 1.5);
+      crop.height = Math.floor(ch * 1.5);
       crop.getContext("2d").drawImage(
         canvas,
         (canvas.width - cw) / 2,
@@ -154,21 +122,15 @@
         0, 0, crop.width, crop.height
       );
 
-      const processed = preprocess(crop, !isMass);
-      preview.src = processed.toDataURL("image/jpeg", 0.85);
+      preview.src = crop.toDataURL("image/jpeg", 0.85);
 
       statusEl.textContent = "Reading…";
       rawEl.textContent = "";
 
       try {
-        let cleaned = "";
-        if (useNative && textDetector) {
-          cleaned = await recognizeWithNative(processed);
-        } else if (tesseractWorker) {
-          cleaned = await recognizeWithTesseract(processed, isMass);
-        }
-
-        rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)") + (useNative ? " [native]" : " [tesseract]");
+        const texts = await textDetector.detect(crop);
+        const cleaned = texts.map(t => t.rawValue || "").join(" ").replace(/\s+/g, " ").trim();
+        rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)");
 
         if (mode === "tag") {
           const match = cleaned.match(/[QAqa]\d{5,6}/i);
@@ -184,8 +146,8 @@
       }
     }
 
-    document.getElementById("btnTag").onclick = () => captureAndOCR("tag");
-    document.getElementById("btnMass").onclick = () => captureAndOCR("mass");
+    btnTag.onclick = () => captureAndOCR("tag");
+    btnMass.onclick = () => captureAndOCR("mass");
 
     document.getElementById("btnSubmit").onclick = async () => {
       const bag = bagInput.value.trim().toUpperCase();
