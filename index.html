@@ -84,7 +84,7 @@
       statusEl.textContent = "Ready";
     }
 
-    function preprocess(sourceCanvas, hardThreshold = false) {
+    function preprocess(sourceCanvas, invert = false, hardThreshold = false) {
       const w = sourceCanvas.width;
       const h = sourceCanvas.height;
       const out = document.createElement("canvas");
@@ -97,9 +97,10 @@
       const data = imgData.data;
       for (let i = 0; i < data.length; i += 4) {
         let v = (data[i] + data[i+1] + data[i+2]) / 3;
-        v = (v - 128) * 1.6 + 128;          // mild contrast boost
+        v = (v - 128) * 1.5 + 128;
         v = Math.max(0, Math.min(255, v));
-        if (hardThreshold) v = v > 130 ? 255 : 0;
+        if (hardThreshold) v = v > 120 ? 255 : 0;
+        if (invert) v = 255 - v;
         data[i] = data[i+1] = data[i+2] = v;
       }
       octx.putImageData(imgData, 0, 0);
@@ -109,7 +110,7 @@
     async function captureAndOCR(mode) {
       if (!worker) return;
       if (!video.videoWidth || !video.videoHeight) {
-        statusEl.textContent = "Camera not ready — wait a second and try again";
+        statusEl.textContent = "Camera not ready — wait and try again";
         return;
       }
 
@@ -119,9 +120,9 @@
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
 
-      // Center crop
-      const cw = Math.floor(canvas.width * 0.65);
-      const ch = Math.floor(canvas.height * 0.35);
+      // Slightly larger center crop
+      const cw = Math.floor(canvas.width * 0.75);
+      const ch = Math.floor(canvas.height * 0.45);
       const crop = document.createElement("canvas");
       crop.width = cw;
       crop.height = ch;
@@ -132,11 +133,10 @@
         cw, ch, 0, 0, cw, ch
       );
 
-      // Soft preprocess first; hard threshold only for mass if needed
-      const processed = preprocess(crop, isMass);
+      // Invert tags (white-on-dark → black-on-white). Soft threshold for mass.
+      const processed = preprocess(crop, !isMass, isMass);
 
-      // Show what OCR actually sees
-      preview.src = processed.toDataURL("image/jpeg", 0.8);
+      preview.src = processed.toDataURL("image/jpeg", 0.85);
 
       if (isMass) {
         await worker.setParameters({
@@ -144,6 +144,7 @@
           tessedit_pageseg_mode: "7"
         });
       } else {
+        // Looser for tags — allow the letters and digits we expect
         await worker.setParameters({
           tessedit_char_whitelist: "0123456789QAqa",
           tessedit_pageseg_mode: "7"
