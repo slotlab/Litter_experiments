@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-  <title>Litter Bag Loader 2</title>
+  <title>Litter Bag Loader</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 12px; background: #f5f5f5; }
     h1 { font-size: 1.4rem; }
@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <h1>Litter Bag Loader 2</h1>
+  <h1>Litter Bag Loader</h1>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas" style="display:none"></canvas>
   <img id="preview" alt="OCR preview">
@@ -47,8 +47,8 @@
   <div id="raw" class="raw"></div>
 
   <script>
-    const WEB_APP = "https://script.google.com/macros/s/AKfycbwKJgkWfrMEsrIgzxoiVLDpiXCsBdBWzgo9owOhLiFygq8JC0u9E5b3OdMvkMFl0vqB/exec";
-    const OCR_API_KEY = "helloworld"; // free demo key; get your own at https://ocr.space/ocrapi for higher limits
+    const WEB_APP = "https://script.google.com/macros/s/AKfycbzo-9C1EV4fdGmMgsFmocIjNaPJ5VS1aKllQiizxonB4fSw1Quuti2o34z75RfWhUKs/exec"; // update if you redeployed
+    const OCR_API_KEY = "helloworld"; // free demo key; get your own at https://ocr.space/ocrapi
 
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
@@ -80,7 +80,6 @@
         return;
       }
 
-      const isMass = mode === "mass";
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
@@ -152,14 +151,22 @@
       }
       statusEl.textContent = "Sending…";
       try {
-        await fetch(WEB_APP, {
+        const res = await fetch(WEB_APP, {
           method: "POST",
-          mode: "no-cors",
           headers: { "Content-Type": "text/plain" },
-          body: JSON.stringify({ bag, mass })
+          body: JSON.stringify({ bag, mass }),
+          redirect: "follow"
         });
-        statusEl.textContent = "Submitted. Bag: " + bag + " mass: " + mass;
-        statusEl.className = "status ok";
+        const text = await res.text();
+        let result;
+        try { result = JSON.parse(text); } catch { result = { raw: text }; }
+        if (result.ok) {
+          statusEl.textContent = "Submitted. Bag: " + bag + " mass: " + mass;
+          statusEl.className = "status ok";
+        } else {
+          statusEl.textContent = "Sheet error: " + (result.error || text || "unknown");
+          statusEl.className = "status err";
+        }
       } catch (err) {
         statusEl.textContent = "Submit failed: " + err.message;
         statusEl.className = "status err";
