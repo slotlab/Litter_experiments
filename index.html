@@ -8,21 +8,22 @@
   <style>
     body { font-family: system-ui, sans-serif; margin: 12px; background: #f5f5f5; }
     h1 { font-size: 1.4rem; }
-    video { width: 100%; max-height: 50vh; background: #000; border-radius: 8px; }
+    video { width: 100%; max-height: 45vh; background: #000; border-radius: 8px; }
+    #preview { max-width: 100%; margin-top: 8px; border: 1px solid #ccc; border-radius: 4px; }
     .row { margin: 10px 0; }
     button { padding: 12px 16px; font-size: 1rem; margin: 4px; border: none; border-radius: 6px; background: #1a73e8; color: white; }
-    button:disabled { opacity: 0.5; }
     input { font-size: 1.2rem; padding: 8px; width: 100%; box-sizing: border-box; }
     .status { min-height: 1.5em; color: #333; white-space: pre-wrap; }
     .ok { color: green; }
     .err { color: #c00; }
-    .raw { font-size: 0.9rem; color: #555; margin-top: 4px; }
+    .raw { font-size: 0.85rem; color: #555; margin-top: 4px; }
   </style>
 </head>
 <body>
   <h1>Litter Bag Loader</h1>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas" style="display:none"></canvas>
+  <img id="preview" alt="OCR preview">
 
   <div class="row">
     <button id="btnTag">Capture Tag</button>
@@ -52,6 +53,7 @@
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
+    const preview = document.getElementById("preview");
     const bagInput = document.getElementById("bag");
     const massInput = document.getElementById("mass");
     const statusEl = document.getElementById("status");
@@ -62,10 +64,12 @@
     async function initCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: false
         });
         video.srcObject = stream;
+        await new Promise(r => video.onloadedmetadata = r);
+        statusEl.textContent = "Camera ready";
       } catch (err) {
         statusEl.textContent = "Camera error: " + err.message;
         statusEl.className = "status err";
@@ -73,15 +77,14 @@
     }
 
     async function initOCR() {
-      statusEl.textContent = "Loading OCR engine…";
+      statusEl.textContent = "Loading OCR…";
       worker = await Tesseract.createWorker("eng", 1, {
         logger: m => { if (m.status === "recognizing text") statusEl.textContent = `OCR ${Math.round(m.progress * 100)}%`; }
       });
       statusEl.textContent = "Ready";
     }
 
-    // Simple contrast + threshold preprocessing to help scale digits
-    function preprocessForOCR(sourceCanvas, forMass = false) {
+    function preprocess(sourceCanvas, hardThreshold = false) {
       const w = sourceCanvas.width;
       const h = sourceCanvas.height;
       const out = document.createElement("canvas");
@@ -93,14 +96,10 @@
       const imgData = octx.getImageData(0, 0, w, h);
       const data = imgData.data;
       for (let i = 0; i < data.length; i += 4) {
-        const avg = (data[i] + data[i+1] + data[i+2]) / 3;
-        // Boost contrast
-        let v = (avg - 128) * 1.8 + 128;
+        let v = (data[i] + data[i+1] + data[i+2]) / 3;
+        v = (v - 128) * 1.6 + 128;          // mild contrast boost
         v = Math.max(0, Math.min(255, v));
-        // Threshold for mass (helps 7-segment)
-        if (forMass) {
-          v = v > 140 ? 255 : 0;
-        }
+        if (hardThreshold) v = v > 130 ? 255 : 0;
         data[i] = data[i+1] = data[i+2] = v;
       }
       octx.putImageData(imgData, 0, 0);
@@ -109,29 +108,36 @@
 
     async function captureAndOCR(mode) {
       if (!worker) return;
+      if (!video.videoWidth || !video.videoHeight) {
+        statusEl.textContent = "Camera not ready — wait a second and try again";
+        return;
+      }
+
       const isMass = mode === "mass";
 
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
 
-      // Crop center region for better focus on tag or display
+      // Center crop
+      const cw = Math.floor(canvas.width * 0.65);
+      const ch = Math.floor(canvas.height * 0.35);
       const crop = document.createElement("canvas");
-      const cw = Math.floor(canvas.width * 0.7);
-      const ch = Math.floor(canvas.height * 0.4);
       crop.width = cw;
       crop.height = ch;
       crop.getContext("2d").drawImage(
         canvas,
         (canvas.width - cw) / 2,
         (canvas.height - ch) / 2,
-        cw, ch,
-        0, 0, cw, ch
+        cw, ch, 0, 0, cw, ch
       );
 
-      const processed = preprocessForOCR(crop, isMass);
+      // Soft preprocess first; hard threshold only for mass if needed
+      const processed = preprocess(crop, isMass);
 
-      // Switch parameters per mode
+      // Show what OCR actually sees
+      preview.src = processed.toDataURL("image/jpeg", 0.8);
+
       if (isMass) {
         await worker.setParameters({
           tessedit_char_whitelist: "0123456789.",
@@ -146,19 +152,23 @@
 
       statusEl.textContent = "Reading…";
       rawEl.textContent = "";
-      const { data: { text } } = await worker.recognize(processed);
-      const cleaned = text.replace(/\s+/g, " ").trim();
-      rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)");
+      try {
+        const { data: { text } } = await worker.recognize(processed);
+        const cleaned = (text || "").replace(/\s+/g, " ").trim();
+        rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)");
 
-      if (mode === "tag") {
-        const match = cleaned.match(/[QAqa]\d{5,6}/i);
-        bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-      } else {
-        const match = cleaned.match(/\d+\.?\d*/);
-        massInput.value = match ? match[0] : cleaned.replace(/[^0-9.]/g, "");
+        if (mode === "tag") {
+          const match = cleaned.match(/[QAqa]\d{5,6}/i);
+          bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+        } else {
+          const match = cleaned.match(/\d+\.?\d*/);
+          massInput.value = match ? match[0] : cleaned.replace(/[^0-9.]/g, "");
+        }
+        statusEl.textContent = "OCR done — edit if needed";
+      } catch (err) {
+        statusEl.textContent = "OCR error: " + err.message;
+        statusEl.className = "status err";
       }
-      statusEl.textContent = "OCR done — edit if needed";
-      statusEl.className = "status";
     }
 
     document.getElementById("btnTag").onclick = () => captureAndOCR("tag");
@@ -180,7 +190,7 @@
           headers: { "Content-Type": "text/plain" },
           body: JSON.stringify({ bag, mass })
         });
-        statusEl.textContent = "Submitted (check sheet). Bag: " + bag + " mass: " + mass;
+        statusEl.textContent = "Submitted. Bag: " + bag + " mass: " + mass;
         statusEl.className = "status ok";
       } catch (err) {
         statusEl.textContent = "Submit failed: " + err.message;
