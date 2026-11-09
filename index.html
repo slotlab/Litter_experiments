@@ -11,7 +11,6 @@
     #preview { max-width: 100%; margin-top: 8px; border: 1px solid #ccc; border-radius: 4px; }
     .row { margin: 10px 0; }
     button { padding: 12px 16px; font-size: 1rem; margin: 4px; border: none; border-radius: 6px; background: #1a73e8; color: white; }
-    button:disabled { opacity: 0.5; }
     input { font-size: 1.2rem; padding: 8px; width: 100%; box-sizing: border-box; }
     .status { min-height: 1.5em; color: #333; white-space: pre-wrap; }
     .ok { color: green; }
@@ -26,8 +25,8 @@
   <img id="preview" alt="OCR preview">
 
   <div class="row">
-    <button id="btnTag" disabled>Capture Tag</button>
-    <button id="btnMass" disabled>Capture Mass</button>
+    <button id="btnTag">Capture Tag</button>
+    <button id="btnMass">Capture Mass</button>
   </div>
 
   <div class="row">
@@ -49,6 +48,7 @@
 
   <script>
     const WEB_APP = "https://script.google.com/macros/s/AKfycbzo-9C1EV4fdGmMgsFmocIjNaPJ5VS1aKllQiizxonB4fSw1Quuti2o34z75RfWhUKs/exec";
+    const OCR_API_KEY = "helloworld"; // free demo key; get your own at https://ocr.space/ocrapi for higher limits
 
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
@@ -58,10 +58,6 @@
     const massInput = document.getElementById("mass");
     const statusEl = document.getElementById("status");
     const rawEl = document.getElementById("raw");
-    const btnTag = document.getElementById("btnTag");
-    const btnMass = document.getElementById("btnMass");
-
-    let textDetector = null;
 
     async function initCamera() {
       try {
@@ -78,39 +74,19 @@
       }
     }
 
-    async function initOCR() {
-      if (!("TextDetector" in window)) {
-        statusEl.textContent = "TextDetector not supported on this browser";
-        statusEl.className = "status err";
-        return;
-      }
-      try {
-        textDetector = new TextDetector();
-        btnTag.disabled = false;
-        btnMass.disabled = false;
-        statusEl.textContent = "Ready (TextDetector)";
-      } catch (err) {
-        statusEl.textContent = "TextDetector failed: " + err.message;
-        statusEl.className = "status err";
-      }
-    }
-
     async function captureAndOCR(mode) {
-      if (!textDetector) return;
       if (!video.videoWidth || !video.videoHeight) {
         statusEl.textContent = "Camera not ready";
         return;
       }
 
       const isMass = mode === "mass";
-
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
 
-      // Center crop, upscaled a bit
       const cw = Math.floor(canvas.width * 0.7);
-      const ch = Math.floor(canvas.height * 0.45);
+      const ch = Math.floor(canvas.height * 0.4);
       const crop = document.createElement("canvas");
       crop.width = Math.floor(cw * 1.5);
       crop.height = Math.floor(ch * 1.5);
@@ -122,14 +98,31 @@
         0, 0, crop.width, crop.height
       );
 
-      preview.src = crop.toDataURL("image/jpeg", 0.85);
+      preview.src = crop.toDataURL("image/jpeg", 0.8);
 
-      statusEl.textContent = "Reading…";
+      statusEl.textContent = "Sending to OCR.space…";
       rawEl.textContent = "";
 
       try {
-        const texts = await textDetector.detect(crop);
-        const cleaned = texts.map(t => t.rawValue || "").join(" ").replace(/\s+/g, " ").trim();
+        const blob = await new Promise(r => crop.toBlob(r, "image/jpeg", 0.7));
+        const form = new FormData();
+        form.append("file", blob, "crop.jpg");
+        form.append("language", "eng");
+        form.append("OCREngine", "2");
+        form.append("scale", "true");
+        form.append("isOverlayRequired", "false");
+
+        const res = await fetch("https://api.ocr.space/parse/image", {
+          method: "POST",
+          headers: { "apikey": OCR_API_KEY },
+          body: form
+        });
+        const json = await res.json();
+
+        if (json.IsErroredOnProcessing) {
+          throw new Error(json.ErrorMessage || "OCR failed");
+        }
+        const cleaned = (json.ParsedResults?.[0]?.ParsedText || "").replace(/\s+/g, " ").trim();
         rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)");
 
         if (mode === "tag") {
@@ -146,8 +139,8 @@
       }
     }
 
-    btnTag.onclick = () => captureAndOCR("tag");
-    btnMass.onclick = () => captureAndOCR("mass");
+    document.getElementById("btnTag").onclick = () => captureAndOCR("tag");
+    document.getElementById("btnMass").onclick = () => captureAndOCR("mass");
 
     document.getElementById("btnSubmit").onclick = async () => {
       const bag = bagInput.value.trim().toUpperCase();
@@ -173,10 +166,7 @@
       }
     };
 
-    (async () => {
-      await initCamera();
-      await initOCR();
-    })();
+    initCamera();
   </script>
 </body>
 </html>
