@@ -13,9 +13,10 @@
     button { padding: 12px 16px; font-size: 1rem; margin: 4px; border: none; border-radius: 6px; background: #1a73e8; color: white; }
     button:disabled { opacity: 0.5; }
     input { font-size: 1.2rem; padding: 8px; width: 100%; box-sizing: border-box; }
-    .status { min-height: 1.5em; color: #333; }
+    .status { min-height: 1.5em; color: #333; white-space: pre-wrap; }
     .ok { color: green; }
     .err { color: #c00; }
+    .raw { font-size: 0.9rem; color: #555; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -43,24 +44,25 @@
     <button id="btnSubmit">Submit to Sheet</button>
   </div>
   <div id="status" class="status"></div>
+  <div id="raw" class="raw"></div>
 
   <script>
-    // Paste your deployed Apps Script /exec URL here
     const WEB_APP = "https://script.google.com/macros/s/AKfycbzo-9C1EV4fdGmMgsFmocIjNaPJ5VS1aKllQiizxonB4fSw1Quuti2o34z75RfWhUKs/exec";
-    
+
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
     const bagInput = document.getElementById("bag");
     const massInput = document.getElementById("mass");
     const statusEl = document.getElementById("status");
+    const rawEl = document.getElementById("raw");
 
     let worker = null;
 
     async function initCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
           audio: false
         });
         video.srcObject = stream;
@@ -75,33 +77,88 @@
       worker = await Tesseract.createWorker("eng", 1, {
         logger: m => { if (m.status === "recognizing text") statusEl.textContent = `OCR ${Math.round(m.progress * 100)}%`; }
       });
-      // Helpful for digits / short codes
-      await worker.setParameters({
-        tessedit_char_whitelist: "0123456789.QAq a",
-        tessedit_pageseg_mode: "7" // single line / treat as single text line
-      });
       statusEl.textContent = "Ready";
+    }
+
+    // Simple contrast + threshold preprocessing to help scale digits
+    function preprocessForOCR(sourceCanvas, forMass = false) {
+      const w = sourceCanvas.width;
+      const h = sourceCanvas.height;
+      const out = document.createElement("canvas");
+      out.width = w;
+      out.height = h;
+      const octx = out.getContext("2d");
+      octx.drawImage(sourceCanvas, 0, 0);
+
+      const imgData = octx.getImageData(0, 0, w, h);
+      const data = imgData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const avg = (data[i] + data[i+1] + data[i+2]) / 3;
+        // Boost contrast
+        let v = (avg - 128) * 1.8 + 128;
+        v = Math.max(0, Math.min(255, v));
+        // Threshold for mass (helps 7-segment)
+        if (forMass) {
+          v = v > 140 ? 255 : 0;
+        }
+        data[i] = data[i+1] = data[i+2] = v;
+      }
+      octx.putImageData(imgData, 0, 0);
+      return out;
     }
 
     async function captureAndOCR(mode) {
       if (!worker) return;
+      const isMass = mode === "mass";
+
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
+
+      // Crop center region for better focus on tag or display
+      const crop = document.createElement("canvas");
+      const cw = Math.floor(canvas.width * 0.7);
+      const ch = Math.floor(canvas.height * 0.4);
+      crop.width = cw;
+      crop.height = ch;
+      crop.getContext("2d").drawImage(
+        canvas,
+        (canvas.width - cw) / 2,
+        (canvas.height - ch) / 2,
+        cw, ch,
+        0, 0, cw, ch
+      );
+
+      const processed = preprocessForOCR(crop, isMass);
+
+      // Switch parameters per mode
+      if (isMass) {
+        await worker.setParameters({
+          tessedit_char_whitelist: "0123456789.",
+          tessedit_pageseg_mode: "7"
+        });
+      } else {
+        await worker.setParameters({
+          tessedit_char_whitelist: "0123456789QAqa",
+          tessedit_pageseg_mode: "7"
+        });
+      }
+
       statusEl.textContent = "Reading…";
-      const { data: { text } } = await worker.recognize(canvas);
+      rawEl.textContent = "";
+      const { data: { text } } = await worker.recognize(processed);
       const cleaned = text.replace(/\s+/g, " ").trim();
+      rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)");
 
       if (mode === "tag") {
-        // Prefer patterns like Q260001 / A260145
-        const match = cleaned.match(/[QAqa]\d{5,6}/);
+        const match = cleaned.match(/[QAqa]\d{5,6}/i);
         bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
       } else {
-        // Prefer a number with optional decimal
         const match = cleaned.match(/\d+\.?\d*/);
         massInput.value = match ? match[0] : cleaned.replace(/[^0-9.]/g, "");
       }
       statusEl.textContent = "OCR done — edit if needed";
+      statusEl.className = "status";
     }
 
     document.getElementById("btnTag").onclick = () => captureAndOCR("tag");
@@ -117,17 +174,14 @@
       }
       statusEl.textContent = "Sending…";
       try {
-        const res = await fetch(WEB_APP, {
+        await fetch(WEB_APP, {
           method: "POST",
-          mode: "no-cors", // Apps Script often needs this for simple posts; response may be opaque
+          mode: "no-cors",
           headers: { "Content-Type": "text/plain" },
           body: JSON.stringify({ bag, mass })
         });
-        // With no-cors you won’t see the body; treat as sent if no network error
         statusEl.textContent = "Submitted (check sheet). Bag: " + bag + " mass: " + mass;
         statusEl.className = "status ok";
-        // Optional: clear fields
-        // bagInput.value = ""; massInput.value = "";
       } catch (err) {
         statusEl.textContent = "Submit failed: " + err.message;
         statusEl.className = "status err";
