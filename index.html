@@ -84,28 +84,47 @@
       statusEl.textContent = "Ready";
     }
 
-    function preprocess(sourceCanvas, invert = false) {
-      const scale = 2;
-      const w = sourceCanvas.width * scale;
-      const h = sourceCanvas.height * scale;
+    function makeCrop(srcCanvas, xFrac, yFrac, wFrac, hFrac, scale = 2) {
+      const sx = Math.floor(srcCanvas.width * xFrac);
+      const sy = Math.floor(srcCanvas.height * yFrac);
+      const sw = Math.floor(srcCanvas.width * wFrac);
+      const sh = Math.floor(srcCanvas.height * hFrac);
       const out = document.createElement("canvas");
-      out.width = w;
-      out.height = h;
+      out.width = sw * scale;
+      out.height = sh * scale;
       const octx = out.getContext("2d");
       octx.imageSmoothingEnabled = true;
-      octx.drawImage(sourceCanvas, 0, 0, w, h);
+      octx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, out.width, out.height);
+      return out;
+    }
 
-      const imgData = octx.getImageData(0, 0, w, h);
+    function preprocess(sourceCanvas, invert = false) {
+      const out = document.createElement("canvas");
+      out.width = sourceCanvas.width;
+      out.height = sourceCanvas.height;
+      const octx = out.getContext("2d");
+      octx.drawImage(sourceCanvas, 0, 0);
+      const imgData = octx.getImageData(0, 0, out.width, out.height);
       const data = imgData.data;
       for (let i = 0; i < data.length; i += 4) {
         let v = (data[i] + data[i+1] + data[i+2]) / 3;
-        v = (v - 128) * 1.4 + 128;
+        v = (v - 128) * 1.5 + 128;
         v = Math.max(0, Math.min(255, v));
         if (invert) v = 255 - v;
         data[i] = data[i+1] = data[i+2] = v;
       }
       octx.putImageData(imgData, 0, 0);
       return out;
+    }
+
+    function scoreText(text) {
+      const cleaned = (text || "").replace(/\s+/g, " ").trim();
+      const match = cleaned.match(/[QAqa]\d{5,6}/i);
+      return {
+        cleaned,
+        score: cleaned.length + (match ? 20 : 0) + (cleaned.match(/\d{5,}/) ? 5 : 0),
+        match: match ? match[0].toUpperCase() : null
+      };
     }
 
     async function captureAndOCR(mode) {
@@ -116,71 +135,58 @@
       }
 
       const isMass = mode === "mass";
-
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0);
 
-      const cw = Math.floor(canvas.width * 0.7);
-      const ch = Math.floor(canvas.height * 0.4);
-      const crop = document.createElement("canvas");
-      crop.width = cw;
-      crop.height = ch;
-      crop.getContext("2d").drawImage(
-        canvas,
-        (canvas.width - cw) / 2,
-        (canvas.height - ch) / 2,
-        cw, ch, 0, 0, cw, ch
-      );
-
-      const processed = preprocess(crop, !isMass);
-      preview.src = processed.toDataURL("image/jpeg", 0.85);
-
       statusEl.textContent = "Reading…";
       rawEl.textContent = "";
 
-      try {
-        let bestText = "";
-        let bestScore = -1;
+      const crops = [
+        { x: 0.15, y: 0.3, w: 0.7, h: 0.4 },
+        { x: 0.1, y: 0.25, w: 0.8, h: 0.5 },
+        { x: 0.2, y: 0.35, w: 0.6, h: 0.3 }
+      ];
 
-        const psms = isMass ? ["7", "8"] : ["7", "6", "8"];
-        for (const psm of psms) {
-          await worker.setParameters({
-            tessedit_pageseg_mode: psm,
-            tessedit_char_whitelist: isMass ? "0123456789." : ""
-          });
-          const { data: { text } } = await worker.recognize(processed);
-          const cleaned = (text || "").replace(/\s+/g, " ").trim();
-          const score = cleaned.length + (cleaned.match(/[QAqa]\d{5,6}/i) ? 10 : 0);
-          if (score > bestScore) {
-            bestScore = score;
-            bestText = cleaned;
+      let best = { cleaned: "", score: -1, match: null, preview: null };
+
+      try {
+        for (const c of crops) {
+          const crop = makeCrop(canvas, c.x, c.y, c.w, c.h, 2);
+          for (const invert of [true, false]) {
+            const processed = preprocess(crop, invert && !isMass);
+            const psms = isMass ? ["7", "8"] : ["7", "6", "8", "13"];
+            for (const psm of psms) {
+              await worker.setParameters({
+                tessedit_pageseg_mode: psm,
+                tessedit_char_whitelist: isMass ? "0123456789." : ""
+              });
+              const { data: { text } } = await worker.recognize(processed);
+              const result = scoreText(text);
+              if (result.score > best.score) {
+                best = { ...result, preview: processed.toDataURL("image/jpeg", 0.8) };
+              }
+            }
           }
         }
 
-        rawEl.textContent = "Raw OCR: " + (bestText || "(nothing)");
+        if (best.preview) preview.src = best.preview;
+        rawEl.textContent = "Raw OCR: " + (best.cleaned || "(nothing)");
 
         if (mode === "tag") {
-          let match = bestText.match(/[QAqa]\d{5,6}/i);
-          if (!match) {
-            const fixed = bestText
-              .replace(/[Oo]/g, "0")
-              .replace(/[IiLl]/g, "1")
-              .replace(/[Ss]/g, "5")
-              .replace(/[Zz]/g, "2");
-            match = fixed.match(/[QAqa]\d{5,6}/i);
-            if (match) bestText = fixed;
-          }
-          if (match) {
-            bagInput.value = match[0].toUpperCase();
+          if (best.match) {
+            bagInput.value = best.match;
           } else {
-            const tokens = bestText.replace(/[^A-Za-z0-9]/g, " ").split(/\s+/).filter(Boolean);
-            const best = tokens.sort((a, b) => b.length - a.length)[0] || "";
-            bagInput.value = best.toUpperCase();
+            // soft fix then retry
+            const fixed = best.cleaned
+              .replace(/[Oo]/g, "0").replace(/[IiLl]/g, "1")
+              .replace(/[Ss]/g, "5").replace(/[Zz]/g, "2");
+            const m = fixed.match(/[QAqa]\d{5,6}/i);
+            bagInput.value = m ? m[0].toUpperCase() : (fixed.replace(/[^A-Za-z0-9]/g, "").toUpperCase() || "");
           }
         } else {
-          const match = bestText.match(/\d+\.?\d*/);
-          massInput.value = match ? match[0] : bestText.replace(/[^0-9.]/g, "");
+          const m = best.cleaned.match(/\d+\.?\d*/);
+          massInput.value = m ? m[0] : best.cleaned.replace(/[^0-9.]/g, "");
         }
         statusEl.textContent = "OCR done — edit if needed";
       } catch (err) {
