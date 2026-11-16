@@ -19,14 +19,13 @@
   </style>
 </head>
 <body>
-  <h1>Litter Bag Loader 3</h1>
+  <h1>Litter Bag Loader 4</h1>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas" style="display:none"></canvas>
   <img id="preview" alt="OCR preview">
 
   <div class="row">
     <button id="btnTag">Capture Tag</button>
-    <button id="btnMass">Capture Mass</button>
   </div>
 
   <div class="row">
@@ -36,7 +35,7 @@
   </div>
   <div class="row">
     <label>Mass in grams<br>
-      <input id="mass" type="number" step="0.0001" placeholder="e.g. 1.2345" autocomplete="off">
+      <input id="mass" type="number" step="0.0001" placeholder="e.g. 1.2345" autocomplete="off" inputmode="decimal">
     </label>
   </div>
   <div class="row">
@@ -83,7 +82,7 @@
       }
     }
 
-    async function captureAndOCR(mode) {
+    async function captureTag() {
       if (!video.videoWidth || !video.videoHeight) {
         statusEl.textContent = "Camera not ready";
         return;
@@ -133,28 +132,8 @@
         const cleaned = (json.ParsedResults?.[0]?.ParsedText || "").replace(/\s+/g, " ").trim();
         rawEl.textContent = "Raw OCR: " + (cleaned || "(nothing)");
 
-        if (mode === "tag") {
-          const match = cleaned.match(/[QAqa]\d{5,6}/i);
-          bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-        } else {
-          // Prefer "1.2345 g" style (1 digit before decimal, 4 after, optional space, g)
-          let match = cleaned.match(/(\d\.\d{4})\s*g/i);
-          if (match) {
-            massInput.value = match[1];
-          } else {
-            // Fallback: any number with decimal
-            match = cleaned.match(/\d+\.\d{1,4}|\d+\.\d*|\d+/);
-            if (match) {
-              massInput.value = match[0];
-            } else {
-              // Last resort: strip to digits and one decimal
-              let stripped = cleaned.replace(/[^0-9.]/g, "");
-              const parts = stripped.split(".");
-              if (parts.length > 2) stripped = parts[0] + "." + parts.slice(1).join("");
-              massInput.value = stripped || "";
-            }
-          }
-        }
+        const match = cleaned.match(/[QAqa]\d{5,6}/i);
+        bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
 
         statusEl.textContent = "OCR done — edit if needed";
       } catch (err) {
@@ -163,8 +142,7 @@
       }
     }
 
-    document.getElementById("btnTag").onclick = () => captureAndOCR("tag");
-    document.getElementById("btnMass").onclick = () => captureAndOCR("mass");
+    document.getElementById("btnTag").onclick = captureTag;
 
     document.getElementById("btnSubmit").onclick = async () => {
       const bag = bagInput.value.trim().toUpperCase();
