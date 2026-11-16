@@ -136,10 +136,59 @@
         if (mode === "tag") {
           const match = cleaned.match(/[QAqa]\d{5,6}/i);
           bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-        } else {
-          const match = cleaned.match(/\d+\.\d{1,4}|\d+\.\d*|\d+/);
-          massInput.value = match ? match[0] : cleaned.replace(/[^0-9.]/g, "");
-        }
+} else {
+  // Prefer "1.2345 g" style (1 digit before decimal, 4 after, optional space, g)
+  let match = cleaned.match(/(\d\.\d{4})\s*g/i);
+  if (match) {
+    massInput.value = match[1];
+  } else {
+    // Fallback: any number with decimal
+    match = cleaned.match(/\d+\.\d{1,4}|\d+\.\d*|\d+/);
+    if (match) {
+      massInput.value = match[0];
+    } else {
+      // Last resort: strip to digits and one decimal
+      let stripped = cleaned.replace(/[^0-9.]/g, "");
+      const parts = stripped.split(".");
+      if (parts.length > 2) stripped = parts[0] + "." + parts.slice(1).join("");
+      massInput.value = stripped || "";
+    }
+  }
+}
+
+Full relevant section for easy copy-pasteInside the try block, after you have cleaned, replace the whole if (mode === "tag") { ... } else { ... } with:javascript
+
+if (mode === "tag") {
+  const match = cleaned.match(/[QAqa]\d{5,6}/i);
+  bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+} else {
+  // Prefer "1.2345 g" style (1 digit before decimal, 4 after, optional space, g)
+  let match = cleaned.match(/(\d\.\d{4})\s*g/i);
+  if (match) {
+    massInput.value = match[1];
+  } else {
+    // Fallback: any number with decimal
+    match = cleaned.match(/\d+\.\d{1,4}|\d+\.\d*|\d+/);
+    if (match) {
+      massInput.value = match[0];
+    } else {
+      // Last resort: strip to digits and one decimal
+      let stripped = cleaned.replace(/[^0-9.]/g, "");
+      const parts = stripped.split(".");
+      if (parts.length > 2) stripped = parts[0] + "." + parts.slice(1).join("");
+      massInput.value = stripped || "";
+    }
+  }
+}
+
+The mass field will now be filled with just the number (e.g. 1.2345) when the scale shows something like 1.2345 g. The raw OCR line still shows the full text so you can verify.
+
+Explain regex capturing groups
+
+Learn about JavaScript regex
+
+Add regex explanation comments
+
         statusEl.textContent = "OCR done — edit if needed";
       } catch (err) {
         statusEl.textContent = "OCR error: " + err.message;
