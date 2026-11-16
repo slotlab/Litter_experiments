@@ -137,7 +137,7 @@
           const match = cleaned.match(/[QAqa]\d{5,6}/i);
           bagInput.value = match ? match[0].toUpperCase() : cleaned.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
         } else {
-          const match = cleaned.match(/\d+\.?\d*/);
+          const match = cleaned.match(/\d+\.\d{1,4}|\d+\.\d*|\d+/);
           massInput.value = match ? match[0] : cleaned.replace(/[^0-9.]/g, "");
         }
         statusEl.textContent = "OCR done — edit if needed";
